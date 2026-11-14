@@ -1,0 +1,1457 @@
+name: Build AnimateBlock Jar
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Mod Files
+        run: |
+          mkdir -p src/main/resources/assets/animateblock/lang
+          mkdir -p src/main/resources/assets/animateblock/models/item
+          mkdir -p src/main/java/com/animateblock/item
+          mkdir -p src/main/java/com/animateblock/timeline
+          mkdir -p src/main/java/com/animateblock/network
+          mkdir -p src/main/java/com/animateblock/server
+          mkdir -p src/main/java/com/animateblock/client/gui
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.1
+          yarn_mappings=1.21.1+build.3
+          loader_version=0.16.5
+          loom_version=1.7-SNAPSHOT
+          fabric_version=0.104.0+1.21.1
+          mod_version=1.0.0
+          maven_group=com.animateblock
+          archives_base_name=animateblock
+          EOF
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  maven {
+                      name = 'Fabric'
+                      url = 'https://maven.fabricmc.net/'
+                  }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          repositories {
+              mavenCentral()
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+
+          cat << 'EOF' > src/main/resources/fabric.mod.json
+          {
+            "schemaVersion": 1,
+            "id": "animateblock",
+            "version": "${version}",
+            "name": "AnimateBlock CapCut Mod",
+            "description": "CapCut-style timeline editor for animating blocks, transitions, graphs, particles, and sounds.",
+            "authors": ["AnimateBlock"],
+            "license": "MIT",
+            "environment": "*",
+            "entrypoints": {
+              "main": ["com.animateblock.AnimateBlockMod"],
+              "client": ["com.animateblock.client.AnimateBlockClient"]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "~1.21.1",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/resources/assets/animateblock/lang/en_us.json
+          {
+            "item.animateblock.animate_block": "AnimateBlock"
+          }
+          EOF
+
+          cat << 'EOF' > src/main/resources/assets/animateblock/models/item/animate_block.json
+          {
+            "parent": "minecraft:item/wooden_axe"
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/item/AnimateBlockItem.java
+          package com.animateblock.item;
+
+          import net.minecraft.block.BlockState;
+          import net.minecraft.entity.player.PlayerEntity;
+          import net.minecraft.item.Item;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.item.tooltip.TooltipType;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Formatting;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.world.World;
+          import java.util.List;
+
+          public class AnimateBlockItem extends Item {
+              public AnimateBlockItem(Settings settings) {
+                  super(settings);
+              }
+
+              @Override
+              public boolean hasGlint(ItemStack stack) {
+                  return true;
+              }
+
+              @Override
+              public Text getName(ItemStack stack) {
+                  return Text.literal("AnimateBlock").formatted(Formatting.AQUA, Formatting.BOLD);
+              }
+
+              @Override
+              public boolean canMine(BlockState state, World world, BlockPos pos, PlayerEntity miner) {
+                  return false;
+              }
+
+              @Override
+              public void appendTooltip(ItemStack stack, TooltipContext context, List<Text> tooltip, TooltipType type) {
+                  tooltip.add(Text.literal("Right-Click block: ").formatted(Formatting.GRAY)
+                          .append(Text.literal("Select block to animate").formatted(Formatting.YELLOW)));
+                  tooltip.add(Text.literal("Shift + Right-Click: ").formatted(Formatting.GRAY)
+                          .append(Text.literal("Copy target Move position").formatted(Formatting.GREEN)));
+                  tooltip.add(Text.literal("Left-Click (Break): ").formatted(Formatting.GRAY)
+                          .append(Text.literal("Open CapCut Timeline Menu").formatted(Formatting.AQUA)));
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/timeline/AnimationData.java
+          package com.animateblock.timeline;
+
+          import net.minecraft.nbt.NbtCompound;
+          import net.minecraft.nbt.NbtElement;
+          import net.minecraft.nbt.NbtList;
+          import net.minecraft.util.math.BlockPos;
+          import java.util.ArrayList;
+          import java.util.Comparator;
+          import java.util.List;
+
+          public class AnimationData {
+              public enum EasingGraph {
+                  LINEAR("Linear"),
+                  EASE_IN("Ease In"),
+                  QUAD_IN("Quad In"),
+                  CUBIC_IN("Cubic In"),
+                  EASE_OUT("Ease Out"),
+                  QUAD_OUT("Quad Out");
+
+                  public final String label;
+                  EasingGraph(String label) { this.label = label; }
+
+                  public double apply(double t) {
+                      t = Math.max(0.0, Math.min(1.0, t));
+                      return switch (this) {
+                          case LINEAR -> t;
+                          case EASE_IN -> 1.0 - Math.cos((t * Math.PI) / 2.0);
+                          case QUAD_IN -> t * t;
+                          case CUBIC_IN -> t * t * t;
+                          case EASE_OUT -> Math.sin((t * Math.PI) / 2.0);
+                          case QUAD_OUT -> 1.0 - (1.0 - t) * (1.0 - t);
+                      };
+                  }
+              }
+
+              public enum EffectType {
+                  SMOKE("Smoke"),
+                  SHAKE_BLOCK("ShakeBlock"),
+                  SMOOTH_SHAKE("SmoothShake"),
+                  FIRE("Fire"),
+                  EXPLODE("Explode"),
+                  FIRE_EXPLODE("FireExplode");
+
+                  public final String label;
+                  EffectType(String label) { this.label = label; }
+              }
+
+              public static class MoveKeyframe {
+                  public float time;
+                  public double dx, dy, dz;
+                  public EasingGraph graph;
+
+                  public MoveKeyframe(float time, double dx, double dy, double dz, EasingGraph graph) {
+                      this.time = time;
+                      this.dx = dx;
+                      this.dy = dy;
+                      this.dz = dz;
+                      this.graph = graph;
+                  }
+              }
+
+              public static class VisibilityKeyframe {
+                  public float time;
+                  public boolean showBlock;
+
+                  public VisibilityKeyframe(float time, boolean showBlock) {
+                      this.time = time;
+                      this.showBlock = showBlock;
+                  }
+              }
+
+              public static class EffectKeyframe {
+                  public float time;
+                  public EffectType effectType;
+                  public boolean showEffect;
+                  public EasingGraph graph;
+
+                  public EffectKeyframe(float time, EffectType effectType, boolean showEffect, EasingGraph graph) {
+                      this.time = time;
+                      this.effectType = effectType;
+                      this.showEffect = showEffect;
+                      this.graph = graph;
+                  }
+              }
+
+              public static class SoundKeyframe {
+                  public float time;
+                  public String soundId;
+
+                  public SoundKeyframe(float time, String soundId) {
+                      this.time = time;
+                      this.soundId = soundId;
+                  }
+              }
+
+              public BlockPos originPos;
+              public float duration = 10.0f;
+              public boolean playing = false;
+              public boolean loop = true;
+              public float currentTime = 0.0f;
+
+              public final List<MoveKeyframe> moveKeyframes = new ArrayList<>();
+              public final List<VisibilityKeyframe> visibilityKeyframes = new ArrayList<>();
+              public final List<EffectKeyframe> effectKeyframes = new ArrayList<>();
+              public final List<SoundKeyframe> soundKeyframes = new ArrayList<>();
+
+              public AnimationData(BlockPos originPos) {
+                  this.originPos = originPos;
+                  this.moveKeyframes.add(new MoveKeyframe(0.0f, 0.0, 0.0, 0.0, EasingGraph.LINEAR));
+                  this.visibilityKeyframes.add(new VisibilityKeyframe(0.0f, true));
+              }
+
+              public void sortAll() {
+                  moveKeyframes.sort(Comparator.comparingDouble(k -> k.time));
+                  visibilityKeyframes.sort(Comparator.comparingDouble(k -> k.time));
+                  effectKeyframes.sort(Comparator.comparingDouble(k -> k.time));
+                  soundKeyframes.sort(Comparator.comparingDouble(k -> k.time));
+              }
+
+              public NbtCompound toNbt() {
+                  NbtCompound nbt = new NbtCompound();
+                  nbt.putInt("ox", originPos.getX());
+                  nbt.putInt("oy", originPos.getY());
+                  nbt.putInt("oz", originPos.getZ());
+                  nbt.putFloat("duration", duration);
+                  nbt.putBoolean("playing", playing);
+                  nbt.putBoolean("loop", loop);
+                  nbt.putFloat("currentTime", currentTime);
+
+                  NbtList moveList = new NbtList();
+                  for (MoveKeyframe k : moveKeyframes) {
+                      NbtCompound c = new NbtCompound();
+                      c.putFloat("t", k.time);
+                      c.putDouble("dx", k.dx);
+                      c.putDouble("dy", k.dy);
+                      c.putDouble("dz", k.dz);
+                      c.putString("g", k.graph.name());
+                      moveList.add(c);
+                  }
+                  nbt.put("moves", moveList);
+
+                  NbtList visList = new NbtList();
+                  for (VisibilityKeyframe k : visibilityKeyframes) {
+                      NbtCompound c = new NbtCompound();
+                      c.putFloat("t", k.time);
+                      c.putBoolean("show", k.showBlock);
+                      visList.add(c);
+                  }
+                  nbt.put("vis", visList);
+
+                  NbtList effList = new NbtList();
+                  for (EffectKeyframe k : effectKeyframes) {
+                      NbtCompound c = new NbtCompound();
+                      c.putFloat("t", k.time);
+                      c.putString("type", k.effectType.name());
+                      c.putBoolean("show", k.showEffect);
+                      c.putString("g", k.graph.name());
+                      effList.add(c);
+                  }
+                  nbt.put("effects", effList);
+
+                  NbtList sndList = new NbtList();
+                  for (SoundKeyframe k : soundKeyframes) {
+                      NbtCompound c = new NbtCompound();
+                      c.putFloat("t", k.time);
+                      c.putString("id", k.soundId);
+                      sndList.add(c);
+                  }
+                  nbt.put("sounds", sndList);
+                  return nbt;
+              }
+
+              public static AnimationData fromNbt(NbtCompound nbt) {
+                  BlockPos pos = new BlockPos(nbt.getInt("ox"), nbt.getInt("oy"), nbt.getInt("oz"));
+                  AnimationData data = new AnimationData(pos);
+                  data.moveKeyframes.clear();
+                  data.visibilityKeyframes.clear();
+                  data.effectKeyframes.clear();
+                  data.soundKeyframes.clear();
+
+                  data.duration = nbt.getFloat("duration");
+                  if (data.duration <= 0.5f) data.duration = 10.0f;
+                  data.playing = nbt.getBoolean("playing");
+                  data.loop = nbt.getBoolean("loop");
+                  data.currentTime = nbt.getFloat("currentTime");
+
+                  NbtList moveList = nbt.getList("moves", NbtElement.COMPOUND_TYPE);
+                  for (int i = 0; i < moveList.size(); i++) {
+                      NbtCompound c = moveList.getCompound(i);
+                      EasingGraph g = EasingGraph.LINEAR;
+                      try { g = EasingGraph.valueOf(c.getString("g")); } catch (Exception ignored) {}
+                      data.moveKeyframes.add(new MoveKeyframe(c.getFloat("t"), c.getDouble("dx"), c.getDouble("dy"), c.getDouble("dz"), g));
+                  }
+
+                  NbtList visList = nbt.getList("vis", NbtElement.COMPOUND_TYPE);
+                  for (int i = 0; i < visList.size(); i++) {
+                      NbtCompound c = visList.getCompound(i);
+                      data.visibilityKeyframes.add(new VisibilityKeyframe(c.getFloat("t"), c.getBoolean("show")));
+                  }
+
+                  NbtList effList = nbt.getList("effects", NbtElement.COMPOUND_TYPE);
+                  for (int i = 0; i < effList.size(); i++) {
+                      NbtCompound c = effList.getCompound(i);
+                      EffectType type = EffectType.SMOKE;
+                      try { type = EffectType.valueOf(c.getString("type")); } catch (Exception ignored) {}
+                      EasingGraph g = EasingGraph.LINEAR;
+                      try { g = EasingGraph.valueOf(c.getString("g")); } catch (Exception ignored) {}
+                      data.effectKeyframes.add(new EffectKeyframe(c.getFloat("t"), type, c.getBoolean("show"), g));
+                  }
+
+                  NbtList sndList = nbt.getList("sounds", NbtElement.COMPOUND_TYPE);
+                  for (int i = 0; i < sndList.size(); i++) {
+                      NbtCompound c = sndList.getCompound(i);
+                      data.soundKeyframes.add(new SoundKeyframe(c.getFloat("t"), c.getString("id")));
+                  }
+
+                  data.sortAll();
+                  return data;
+              }
+
+              public double[] evaluatePositionOffset(float time) {
+                  if (moveKeyframes.isEmpty()) return new double[]{0, 0, 0};
+                  if (time <= moveKeyframes.getFirst().time) {
+                      MoveKeyframe first = moveKeyframes.getFirst();
+                      return new double[]{first.dx, first.dy, first.dz};
+                  }
+                  if (time >= moveKeyframes.getLast().time) {
+                      MoveKeyframe last = moveKeyframes.getLast();
+                      return new double[]{last.dx, last.dy, last.dz};
+                  }
+                  for (int i = 0; i < moveKeyframes.size() - 1; i++) {
+                      MoveKeyframe a = moveKeyframes.get(i);
+                      MoveKeyframe b = moveKeyframes.get(i + 1);
+                      if (time >= a.time && time <= b.time) {
+                          double span = Math.max(0.0001, b.time - a.time);
+                          double rawT = (time - a.time) / span;
+                          double easedT = b.graph.apply(rawT);
+                          return new double[]{
+                                  a.dx + (b.dx - a.dx) * easedT,
+                                  a.dy + (b.dy - a.dy) * easedT,
+                                  a.dz + (b.dz - a.dz) * easedT
+                          };
+                      }
+                  }
+                  return new double[]{0, 0, 0};
+              }
+
+              public boolean evaluateVisibility(float time) {
+                  boolean visible = true;
+                  for (VisibilityKeyframe k : visibilityKeyframes) {
+                      if (k.time <= time + 0.001f) {
+                          visible = k.showBlock;
+                      } else {
+                          break;
+                      }
+                  }
+                  return visible;
+              }
+
+              public boolean isEffectActive(EffectType type, float time) {
+                  boolean active = false;
+                  for (EffectKeyframe k : effectKeyframes) {
+                      if (k.effectType == type) {
+                          if (k.time <= time + 0.001f) {
+                              active = k.showEffect;
+                          } else {
+                              break;
+                          }
+                      }
+                  }
+                  return active;
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/network/SyncTimelinePayload.java
+          package com.animateblock.network;
+
+          import com.animateblock.AnimateBlockMod;
+          import net.minecraft.nbt.NbtCompound;
+          import net.minecraft.network.RegistryByteBuf;
+          import net.minecraft.network.codec.PacketCodec;
+          import net.minecraft.network.codec.PacketCodecs;
+          import net.minecraft.network.packet.CustomPayload;
+          import net.minecraft.util.Identifier;
+
+          public record SyncTimelinePayload(NbtCompound nbt, boolean stopAndRestore) implements CustomPayload {
+              public static final CustomPayload.Id<SyncTimelinePayload> ID =
+                      new CustomPayload.Id<>(Identifier.of(AnimateBlockMod.MOD_ID, "sync_timeline"));
+
+              public static final PacketCodec<RegistryByteBuf, SyncTimelinePayload> CODEC = PacketCodec.tuple(
+                      PacketCodecs.NBT_COMPOUND, SyncTimelinePayload::nbt,
+                      PacketCodecs.BOOL, SyncTimelinePayload::stopAndRestore,
+                      SyncTimelinePayload::new
+              );
+
+              @Override
+              public Id<? extends CustomPayload> getId() {
+                  return ID;
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/server/ServerAnimationManager.java
+          package com.animateblock.server;
+
+          import com.animateblock.timeline.AnimationData;
+          import net.minecraft.block.BlockState;
+          import net.minecraft.block.Blocks;
+          import net.minecraft.entity.Entity;
+          import net.minecraft.entity.EntityType;
+          import net.minecraft.entity.decoration.DisplayEntity;
+          import net.minecraft.nbt.NbtCompound;
+          import net.minecraft.nbt.NbtHelper;
+          import net.minecraft.particle.ParticleTypes;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.server.MinecraftServer;
+          import net.minecraft.server.world.ServerWorld;
+          import net.minecraft.sound.SoundCategory;
+          import net.minecraft.sound.SoundEvent;
+          import net.minecraft.util.Identifier;
+          import net.minecraft.util.math.BlockPos;
+          import net.minecraft.util.math.random.Random;
+          import java.util.HashMap;
+          import java.util.Iterator;
+          import java.util.Map;
+          import java.util.UUID;
+
+          public class ServerAnimationManager {
+              private static class ActiveBlockAnimation {
+                  final ServerWorld world;
+                  final BlockPos originPos;
+                  final BlockState originalState;
+                  AnimationData data;
+                  UUID displayEntityUuid;
+                  float prevTime = -1.0f;
+                  boolean currentlyVisible = true;
+
+                  ActiveBlockAnimation(ServerWorld world, BlockPos originPos, BlockState originalState, AnimationData data) {
+                      this.world = world;
+                      this.originPos = originPos;
+                      this.originalState = originalState;
+                      this.data = data;
+                  }
+              }
+
+              private static final Map<BlockPos, ActiveBlockAnimation> ACTIVE = new HashMap<>();
+
+              public static void updateOrStart(ServerWorld world, AnimationData incoming, boolean stopAndRestore) {
+                  BlockPos pos = incoming.originPos;
+                  ActiveBlockAnimation existing = ACTIVE.get(pos);
+
+                  if (stopAndRestore) {
+                      if (existing != null) {
+                          restoreBlock(existing);
+                          ACTIVE.remove(pos);
+                      }
+                      return;
+                  }
+
+                  if (existing == null) {
+                      BlockState currentWorldState = world.getBlockState(pos);
+                      if (currentWorldState.isAir()) {
+                          currentWorldState = Blocks.OAK_PLANKS.getDefaultState();
+                      }
+                      existing = new ActiveBlockAnimation(world, pos, currentWorldState, incoming);
+                      ACTIVE.put(pos, existing);
+                      world.setBlockState(pos, Blocks.AIR.getDefaultState(), 3);
+                      spawnDisplayEntity(existing);
+                  } else {
+                      existing.data = incoming;
+                  }
+
+                  applyFrame(existing, incoming.currentTime, false);
+              }
+
+              private static void spawnDisplayEntity(ActiveBlockAnimation anim) {
+                  DisplayEntity.BlockDisplayEntity display = new DisplayEntity.BlockDisplayEntity(EntityType.BLOCK_DISPLAY, anim.world);
+                  display.setPosition(anim.originPos.getX(), anim.originPos.getY(), anim.originPos.getZ());
+                  NbtCompound nbt = new NbtCompound();
+                  display.writeNbt(nbt);
+                  nbt.put("block_state", NbtHelper.fromBlockState(anim.originalState));
+                  nbt.putInt("teleport_duration", 1);
+                  display.readNbt(nbt);
+                  display.setPosition(anim.originPos.getX(), anim.originPos.getY(), anim.originPos.getZ());
+                  anim.world.spawnEntity(display);
+                  anim.displayEntityUuid = display.getUuid();
+              }
+
+              private static DisplayEntity.BlockDisplayEntity getDisplay(ActiveBlockAnimation anim) {
+                  if (anim.displayEntityUuid == null) return null;
+                  Entity e = anim.world.getEntity(anim.displayEntityUuid);
+                  if (e instanceof DisplayEntity.BlockDisplayEntity bde) {
+                      return bde;
+                  }
+                  return null;
+              }
+
+              private static void restoreBlock(ActiveBlockAnimation anim) {
+                  DisplayEntity.BlockDisplayEntity display = getDisplay(anim);
+                  if (display != null) {
+                      display.discard();
+                  }
+                  anim.world.setBlockState(anim.originPos, anim.originalState, 3);
+              }
+
+              public static void tick(MinecraftServer server) {
+                  Iterator<Map.Entry<BlockPos, ActiveBlockAnimation>> it = ACTIVE.entrySet().iterator();
+                  while (it.hasNext()) {
+                      ActiveBlockAnimation anim = it.next().getValue();
+                      if (anim.data.playing) {
+                          float prev = anim.data.currentTime;
+                          anim.data.currentTime += 0.05f;
+                          if (anim.data.currentTime > anim.data.duration) {
+                              if (anim.data.loop) {
+                                  anim.data.currentTime = 0.0f;
+                                  anim.prevTime = -1.0f;
+                              } else {
+                                  anim.data.currentTime = anim.data.duration;
+                                  anim.data.playing = false;
+                              }
+                          }
+                          applyFrame(anim, anim.data.currentTime, true);
+                          anim.prevTime = prev;
+                      }
+                  }
+              }
+
+              private static void applyFrame(ActiveBlockAnimation anim, float time, boolean triggerEvents) {
+                  DisplayEntity.BlockDisplayEntity display = getDisplay(anim);
+                  if (display == null) {
+                      spawnDisplayEntity(anim);
+                      display = getDisplay(anim);
+                      if (display == null) return;
+                  }
+
+                  boolean visible = anim.data.evaluateVisibility(time);
+                  if (visible != anim.currentlyVisible) {
+                      anim.currentlyVisible = visible;
+                      NbtCompound nbt = new NbtCompound();
+                      display.writeNbt(nbt);
+                      nbt.put("block_state", NbtHelper.fromBlockState(visible ? anim.originalState : Blocks.AIR.getDefaultState()));
+                      display.readNbt(nbt);
+                  }
+
+                  double[] offset = anim.data.evaluatePositionOffset(time);
+                  double x = anim.originPos.getX() + offset[0];
+                  double y = anim.originPos.getY() + offset[1];
+                  double z = anim.originPos.getZ() + offset[2];
+
+                  Random rng = anim.world.getRandom();
+
+                  if (anim.data.isEffectActive(AnimationData.EffectType.SHAKE_BLOCK, time)) {
+                      x += (rng.nextDouble() - 0.5) * 0.35;
+                      y += (rng.nextDouble() - 0.5) * 0.35;
+                      z += (rng.nextDouble() - 0.5) * 0.35;
+                  }
+                  if (anim.data.isEffectActive(AnimationData.EffectType.SMOOTH_SHAKE, time)) {
+                      x += Math.sin(time * 18.0) * 0.18;
+                      y += Math.cos(time * 14.0) * 0.12;
+                      z += Math.sin(time * 15.0 + 1.2) * 0.18;
+                  }
+
+                  display.requestTeleport(x, y, z);
+
+                  double cx = x + 0.5;
+                  double cy = y + 0.5;
+                  double cz = z + 0.5;
+
+                  if (anim.data.isEffectActive(AnimationData.EffectType.SMOKE, time)) {
+                      anim.world.spawnParticles(ParticleTypes.LARGE_SMOKE, cx, cy, cz, 4, 0.3, 0.3, 0.3, 0.02);
+                      anim.world.spawnParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE, cx, cy + 0.3, cz, 2, 0.2, 0.2, 0.2, 0.01);
+                  }
+                  if (anim.data.isEffectActive(AnimationData.EffectType.FIRE, time)) {
+                      anim.world.spawnParticles(ParticleTypes.FLAME, cx, cy, cz, 6, 0.35, 0.35, 0.35, 0.03);
+                      anim.world.spawnParticles(ParticleTypes.LAVA, cx, cy, cz, 1, 0.2, 0.2, 0.2, 0.0);
+                  }
+                  if (anim.data.isEffectActive(AnimationData.EffectType.EXPLODE, time)) {
+                      anim.world.spawnParticles(ParticleTypes.EXPLOSION, cx, cy, cz, 2, 0.3, 0.3, 0.3, 0.05);
+                      anim.world.spawnParticles(ParticleTypes.POOF, cx, cy, cz, 5, 0.4, 0.4, 0.4, 0.05);
+                  }
+                  if (anim.data.isEffectActive(AnimationData.EffectType.FIRE_EXPLODE, time)) {
+                      anim.world.spawnParticles(ParticleTypes.EXPLOSION_EMITTER, cx, cy, cz, 1, 0.0, 0.0, 0.0, 0.0);
+                      anim.world.spawnParticles(ParticleTypes.FLAME, cx, cy, cz, 12, 0.5, 0.5, 0.5, 0.08);
+                      anim.world.spawnParticles(ParticleTypes.LAVA, cx, cy, cz, 4, 0.4, 0.4, 0.4, 0.05);
+                  }
+
+                  if (triggerEvents) {
+                      float windowStart = anim.prevTime < 0 ? time - 0.05f : anim.prevTime;
+                      for (AnimationData.SoundKeyframe sk : anim.data.soundKeyframes) {
+                          if (sk.time > windowStart && sk.time <= time + 0.001f) {
+                              Identifier id = Identifier.tryParse(sk.soundId);
+                              if (id != null) {
+                                  SoundEvent event = Registries.SOUND_EVENT.get(id);
+                                  if (event != null) {
+                                      anim.world.playSound(null, BlockPos.ofFloored(cx, cy, cz), event, SoundCategory.BLOCKS, 1.0f, 1.0f);
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/AnimateBlockMod.java
+          package com.animateblock;
+
+          import com.animateblock.item.AnimateBlockItem;
+          import com.animateblock.network.SyncTimelinePayload;
+          import com.animateblock.server.ServerAnimationManager;
+          import com.animateblock.timeline.AnimationData;
+          import net.fabricmc.api.ModInitializer;
+          import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+          import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
+          import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
+          import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+          import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+          import net.minecraft.item.Item;
+          import net.minecraft.item.ItemGroups;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.registry.Registry;
+          import net.minecraft.server.network.ServerPlayerEntity;
+          import net.minecraft.util.Identifier;
+          import net.minecraft.util.Rarity;
+
+          public class AnimateBlockMod implements ModInitializer {
+              public static final String MOD_ID = "animateblock";
+
+              public static final Item ANIMATE_BLOCK_ITEM = Registry.register(
+                      Registries.ITEM,
+                      Identifier.of(MOD_ID, "animate_block"),
+                      new AnimateBlockItem(new Item.Settings().maxCount(1).rarity(Rarity.EPIC))
+              );
+
+              @Override
+              public void onInitialize() {
+                  ItemGroupEvents.modifyEntriesEvent(ItemGroups.TOOLS).register(entries -> entries.add(ANIMATE_BLOCK_ITEM));
+
+                  ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+                      ServerPlayerEntity player = handler.getPlayer();
+                      boolean hasItem = false;
+                      for (int i = 0; i < player.getInventory().size(); i++) {
+                          if (player.getInventory().getStack(i).isOf(ANIMATE_BLOCK_ITEM)) {
+                              hasItem = true;
+                              break;
+                          }
+                      }
+                      if (!hasItem) {
+                          player.getInventory().insertStack(new ItemStack(ANIMATE_BLOCK_ITEM));
+                      }
+                  });
+
+                  PayloadTypeRegistry.playC2S().register(SyncTimelinePayload.ID, SyncTimelinePayload.CODEC);
+
+                  ServerPlayNetworking.registerGlobalReceiver(SyncTimelinePayload.ID, (payload, context) -> {
+                      context.server().execute(() -> {
+                          AnimationData data = AnimationData.fromNbt(payload.nbt());
+                          ServerAnimationManager.updateOrStart(context.player().getServerWorld(), data, payload.stopAndRestore());
+                      });
+                  });
+
+                  ServerTickEvents.END_SERVER_TICK.register(ServerAnimationManager::tick);
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/client/AnimateBlockClient.java
+          package com.animateblock.client;
+
+          import com.animateblock.AnimateBlockMod;
+          import com.animateblock.client.gui.CapCutScreen;
+          import com.animateblock.timeline.AnimationData;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+          import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.ActionResult;
+          import net.minecraft.util.Formatting;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.math.BlockPos;
+          import java.util.HashMap;
+          import java.util.Map;
+
+          public class AnimateBlockClient implements ClientModInitializer {
+              public static BlockPos selectedBlockPos = null;
+              public static BlockPos copiedMoveTargetPos = null;
+              private static final Map<BlockPos, AnimationData> TIMELINES = new HashMap<>();
+
+              public static AnimationData getOrCreateTimeline(BlockPos pos) {
+                  return TIMELINES.computeIfAbsent(pos.toImmutable(), AnimationData::new);
+              }
+
+              @Override
+              public void onInitializeClient() {
+                  UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+                      if (hand != Hand.MAIN_HAND) return ActionResult.PASS;
+                      if (!player.getMainHandStack().isOf(AnimateBlockMod.ANIMATE_BLOCK_ITEM)) return ActionResult.PASS;
+
+                      BlockPos clicked = hitResult.getBlockPos().toImmutable();
+                      if (world.isClient) {
+                          if (player.isSneaking() && selectedBlockPos != null) {
+                              copiedMoveTargetPos = clicked.up();
+                              int dx = copiedMoveTargetPos.getX() - selectedBlockPos.getX();
+                              int dy = copiedMoveTargetPos.getY() - selectedBlockPos.getY();
+                              int dz = copiedMoveTargetPos.getZ() - selectedBlockPos.getZ();
+                              player.sendMessage(Text.literal("♦ Copied Move Offset: (" + dx + ", " + dy + ", " + dz + ")! Left-click to open CapCut Menu.")
+                                      .formatted(Formatting.GREEN), true);
+                          } else {
+                              selectedBlockPos = clicked;
+                              getOrCreateTimeline(selectedBlockPos);
+                              player.sendMessage(Text.literal("♦ Selected Block at (" + clicked.toShortString() + ")! Left-Click (Break) to open CapCut Menu.")
+                                      .formatted(Formatting.AQUA), true);
+                          }
+                      }
+                      return ActionResult.SUCCESS;
+                  });
+
+                  AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
+                      if (!player.getMainHandStack().isOf(AnimateBlockMod.ANIMATE_BLOCK_ITEM)) return ActionResult.PASS;
+
+                      if (world.isClient) {
+                          if (selectedBlockPos == null) {
+                              selectedBlockPos = pos.toImmutable();
+                          }
+                          AnimationData data = getOrCreateTimeline(selectedBlockPos);
+                          MinecraftClient.getInstance().execute(() ->
+                                  MinecraftClient.getInstance().setScreen(new CapCutScreen(data))
+                          );
+                      }
+                      return ActionResult.FAIL;
+                  });
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/java/com/animateblock/client/gui/CapCutScreen.java
+          package com.animateblock.client.gui;
+
+          import com.animateblock.client.AnimateBlockClient;
+          import com.animateblock.network.SyncTimelinePayload;
+          import com.animateblock.timeline.AnimationData;
+          import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.nbt.NbtCompound;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.sound.SoundEvent;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Identifier;
+          import net.minecraft.util.math.BlockPos;
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Stack;
+
+          public class CapCutScreen extends Screen {
+              private enum SubPanel { NONE, MOVE_EDIT, EFFECTS, SOUNDS, GRAPHS }
+
+              private final AnimationData data;
+              private SubPanel activePanel = SubPanel.NONE;
+              private final Stack<NbtCompound> undoStack = new Stack<>();
+              private final Stack<NbtCompound> redoStack = new Stack<>();
+
+              private double editDx = 0.0;
+              private double editDy = 1.0;
+              private double editDz = 0.0;
+              private AnimationData.EasingGraph selectedGraph = AnimationData.EasingGraph.LINEAR;
+              private AnimationData.EffectType selectedEffect = AnimationData.EffectType.SMOOTH_SHAKE;
+
+              private TextFieldWidget soundSearchField;
+              private final List<String> allSoundIds = new ArrayList<>();
+              private final List<String> filteredSoundIds = new ArrayList<>();
+              private int soundScrollOffset = 0;
+              private boolean draggingPlayhead = false;
+
+              public CapCutScreen(AnimationData data) {
+                  super(Text.literal("CapCut Block Animator"));
+                  this.data = data;
+
+                  if (AnimateBlockClient.copiedMoveTargetPos != null && data.originPos != null) {
+                      BlockPos diff = AnimateBlockClient.copiedMoveTargetPos.subtract(data.originPos);
+                      this.editDx = diff.getX();
+                      this.editDy = diff.getY();
+                      this.editDz = diff.getZ();
+                  }
+
+                  for (Identifier id : Registries.SOUND_EVENT.getIds()) {
+                      allSoundIds.add(id.toString());
+                  }
+                  allSoundIds.sort(String::compareTo);
+                  filteredSoundIds.addAll(allSoundIds);
+              }
+
+              @Override
+              protected void init() {
+                  super.init();
+                  soundSearchField = new TextFieldWidget(this.textRenderer, this.width / 2 - 110, 42, 220, 16, Text.literal("Search sound..."));
+                  soundSearchField.setMaxLength(100);
+                  soundSearchField.setSuggestion("Search sound (e.g. explode, note, bell)...");
+                  soundSearchField.setChangedListener(query -> {
+                      soundSearchField.setSuggestion(query.isEmpty() ? "Search sound (e.g. explode, note, bell)..." : "");
+                      filterSounds(query);
+                  });
+                  this.addSelectableChild(soundSearchField);
+                  syncToServer(false);
+              }
+
+              private void filterSounds(String query) {
+                  filteredSoundIds.clear();
+                  String lower = query.toLowerCase(Locale.ROOT).trim();
+                  for (String id : allSoundIds) {
+                      if (lower.isEmpty() || id.toLowerCase(Locale.ROOT).contains(lower)) {
+                          filteredSoundIds.add(id);
+                      }
+                  }
+                  soundScrollOffset = 0;
+              }
+
+              private void pushUndoState() {
+                  undoStack.push(data.toNbt());
+                  if (undoStack.size() > 30) undoStack.removeFirst();
+                  redoStack.clear();
+              }
+
+              private void undo() {
+                  if (!undoStack.isEmpty()) {
+                      redoStack.push(data.toNbt());
+                      restoreFromNbt(undoStack.pop());
+                      syncToServer(false);
+                  }
+              }
+
+              private void redo() {
+                  if (!redoStack.isEmpty()) {
+                      undoStack.push(data.toNbt());
+                      restoreFromNbt(redoStack.pop());
+                      syncToServer(false);
+                  }
+              }
+
+              private void restoreFromNbt(NbtCompound nbt) {
+                  AnimationData restored = AnimationData.fromNbt(nbt);
+                  data.moveKeyframes.clear();
+                  data.moveKeyframes.addAll(restored.moveKeyframes);
+                  data.visibilityKeyframes.clear();
+                  data.visibilityKeyframes.addAll(restored.visibilityKeyframes);
+                  data.effectKeyframes.clear();
+                  data.effectKeyframes.addAll(restored.effectKeyframes);
+                  data.soundKeyframes.clear();
+                  data.soundKeyframes.addAll(restored.soundKeyframes);
+              }
+
+              private void syncToServer(boolean stopAndRestore) {
+                  data.sortAll();
+                  ClientPlayNetworking.send(new SyncTimelinePayload(data.toNbt(), stopAndRestore));
+              }
+
+              @Override
+              public void tick() {
+                  super.tick();
+                  if (data.playing) {
+                      data.currentTime += 0.05f;
+                      if (data.currentTime > data.duration) {
+                          if (data.loop) {
+                              data.currentTime = 0.0f;
+                          } else {
+                              data.currentTime = data.duration;
+                              data.playing = false;
+                          }
+                      }
+                  }
+              }
+
+              @Override
+              public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {}
+
+              @Override
+              public boolean shouldPause() { return false; }
+
+              private int getTimelineLeft() { return 48; }
+              private int getTimelineRight() { return this.width - 20; }
+
+              private int timeToX(float t) {
+                  int left = getTimelineLeft();
+                  int right = getTimelineRight();
+                  return left + Math.round((t / data.duration) * (right - left));
+              }
+
+              private float xToTime(double mouseX) {
+                  int left = getTimelineLeft();
+                  int right = getTimelineRight();
+                  float norm = (float) ((mouseX - left) / (double) Math.max(1, right - left));
+                  norm = Math.max(0.0f, Math.min(1.0f, norm));
+                  return Math.round(norm * data.duration * 20.0f) / 20.0f;
+              }
+
+              @Override
+              public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+                  int panelTop = this.height - 142;
+                  int transportY = panelTop - 22;
+
+                  context.fill(0, transportY, this.width, panelTop, 0xE6101014);
+                  context.fill(0, transportY, this.width, transportY + 1, 0xFF00BCD4);
+
+                  drawButton(context, 8, transportY + 3, 56, 16, "[Reset]", 0xFF23232B, mouseX, mouseY);
+                  String timeStr = String.format(Locale.US, "%.1fs / %.1fs", data.currentTime, data.duration);
+                  context.drawTextWithShadow(this.textRenderer, timeStr, 70, transportY + 7, 0xFFCCCCCC);
+
+                  String playSymbol = data.playing ? "||" : "▶";
+                  drawButton(context, this.width / 2 - 16, transportY + 2, 32, 18, playSymbol, data.playing ? 0xFF00838F : 0xFF282832, mouseX, mouseY);
+
+                  drawButton(context, this.width - 116, transportY + 3, 34, 16, "+♦", 0xFF00ACC1, mouseX, mouseY);
+                  drawButton(context, this.width - 76, transportY + 3, 30, 16, "↶", undoStack.isEmpty() ? 0xFF1A1A20 : 0xFF2E2E38, mouseX, mouseY);
+                  drawButton(context, this.width - 40, transportY + 3, 30, 16, "↷", redoStack.isEmpty() ? 0xFF1A1A20 : 0xFF2E2E38, mouseX, mouseY);
+
+                  context.fill(0, panelTop, this.width, this.height, 0xF216161A);
+
+                  int tlLeft = getTimelineLeft();
+                  int tlRight = getTimelineRight();
+
+                  int track1Y = panelTop + 8;
+                  context.fill(8, track1Y, 40, track1Y + 24, 0xFF25252D);
+                  context.drawCenteredTextWithShadow(this.textRenderer, "BLK", 24, track1Y + 8, 0xFF00E5FF);
+                  context.fill(tlLeft, track1Y, tlRight, track1Y + 24, 0xFF262630);
+                  context.drawBorder(tlLeft, track1Y, tlRight - tlLeft, 24, 0xFF3E3E4C);
+
+                  for (int i = 0; i < data.moveKeyframes.size() - 1; i++) {
+                      AnimationData.MoveKeyframe a = data.moveKeyframes.get(i);
+                      AnimationData.MoveKeyframe b = data.moveKeyframes.get(i + 1);
+                      int x1 = timeToX(a.time);
+                      int x2 = timeToX(b.time);
+                      context.fill(x1, track1Y + 4, x2, track1Y + 20, 0x6600ACC1);
+                      String spanLabel = "movetheblock [" + b.graph.label + "]";
+                      if (x2 - x1 > 45) {
+                          context.drawCenteredTextWithShadow(this.textRenderer, spanLabel, (x1 + x2) / 2, track1Y + 8, 0xFFE0F7FA);
+                      }
+                  }
+                  for (AnimationData.MoveKeyframe k : data.moveKeyframes) {
+                      drawDiamond(context, timeToX(k.time), track1Y + 12, 0xFFFF5252);
+                  }
+                  for (AnimationData.VisibilityKeyframe vk : data.visibilityKeyframes) {
+                      int kx = timeToX(vk.time);
+                      drawDiamond(context, kx, track1Y + 4, vk.showBlock ? 0xFF69F0AE : 0xFFFFAB40);
+                      context.drawTextWithShadow(this.textRenderer, vk.showBlock ? "♦show" : "♦hide", kx + 4, track1Y + 1, vk.showBlock ? 0xFF69F0AE : 0xFFFFAB40);
+                  }
+
+                  int track2Y = track1Y + 30;
+                  context.fill(8, track2Y, 40, track2Y + 22, 0xFF25252D);
+                  context.drawCenteredTextWithShadow(this.textRenderer, "♪", 24, track2Y + 7, 0xFFCCCCCC);
+                  context.fill(tlLeft, track2Y, tlRight, track2Y + 22, 0xFF202028);
+                  if (data.soundKeyframes.isEmpty()) {
+                      context.drawTextWithShadow(this.textRenderer, "+ Add audio (Click SOUND)", tlLeft + 8, track2Y + 7, 0xFF777785);
+                  } else {
+                      for (AnimationData.SoundKeyframe sk : data.soundKeyframes) {
+                          int sx = timeToX(sk.time);
+                          int endX = Math.min(tlRight, sx + 68);
+                          context.fill(sx, track2Y + 3, endX, track2Y + 19, 0x883949AB);
+                          drawDiamond(context, sx, track2Y + 11, 0xFF82B1FF);
+                          drawDiamond(context, endX, track2Y + 11, 0xFF82B1FF);
+                          String shortName = sk.soundId.replace("minecraft:", "");
+                          if (shortName.length() > 10) shortName = shortName.substring(0, 10);
+                          context.drawCenteredTextWithShadow(this.textRenderer, shortName, (sx + endX) / 2, track2Y + 7, 0xFFFFFFFF);
+                      }
+                  }
+
+                  int track3Y = track2Y + 26;
+                  context.fill(8, track3Y, 40, track3Y + 22, 0xFF25252D);
+                  context.drawCenteredTextWithShadow(this.textRenderer, "★", 24, track3Y + 7, 0xFFFFD54F);
+                  context.fill(tlLeft, track3Y, tlRight, track3Y + 22, 0xFF202028);
+                  if (data.effectKeyframes.isEmpty()) {
+                      context.drawTextWithShadow(this.textRenderer, "+ Add effect (Smoke, ShakeBlock, SmoothShake, Fire, Explode)", tlLeft + 8, track3Y + 7, 0xFF777785);
+                  } else {
+                      for (int i = 0; i < data.effectKeyframes.size(); i++) {
+                          AnimationData.EffectKeyframe ek = data.effectKeyframes.get(i);
+                          int x1 = timeToX(ek.time);
+                          if (ek.showEffect) {
+                              int x2 = tlRight;
+                              for (int j = i + 1; j < data.effectKeyframes.size(); j++) {
+                                  AnimationData.EffectKeyframe next = data.effectKeyframes.get(j);
+                                  if (next.effectType == ek.effectType && !next.showEffect) {
+                                      x2 = timeToX(next.time);
+                                      break;
+                                  }
+                              }
+                              context.fill(x1, track3Y + 3, x2, track3Y + 19, 0x886A1B9A);
+                              context.drawCenteredTextWithShadow(this.textRenderer, "♦ " + ek.effectType.label + " ♦", (x1 + x2) / 2, track3Y + 7, 0xFFFFF59D);
+                          }
+                          drawDiamond(context, x1, track3Y + 11, ek.showEffect ? 0xFFE040FB : 0xFFFF5252);
+                      }
+                  }
+
+                  int playheadX = timeToX(data.currentTime);
+                  context.fill(playheadX - 1, panelTop + 2, playheadX + 1, panelTop + 92, 0xFFFFFFFF);
+                  context.fill(playheadX - 4, panelTop + 2, playheadX + 4, panelTop + 6, 0xFFFFFFFF);
+
+                  int barY = this.height - 34;
+                  context.fill(0, barY - 4, this.width, this.height, 0xFF101014);
+                  int btnW = (this.width - 24) / 7;
+                  String[] labels = {"< Close", "♦ MovePos", "♦ Show/Hide", "Graphs", "EFFECT", "SOUND", "Delete ♦"};
+                  SubPanel[] targets = {null, SubPanel.MOVE_EDIT, null, SubPanel.GRAPHS, SubPanel.EFFECTS, SubPanel.SOUNDS, null};
+
+                  for (int i = 0; i < labels.length; i++) {
+                      int bx = 8 + i * (btnW + 2);
+                      boolean active = targets[i] != null && activePanel == targets[i];
+                      drawButton(context, bx, barY, btnW, 24, labels[i], active ? 0xFF00ACC1 : 0xFF23232C, mouseX, mouseY);
+                  }
+
+                  renderSubPanel(context, mouseX, mouseY, transportY);
+                  super.render(context, mouseX, mouseY, delta);
+              }
+
+              private void renderSubPanel(DrawContext context, int mouseX, int mouseY, int transportY) {
+                  if (activePanel == SubPanel.NONE) return;
+
+                  if (activePanel == SubPanel.GRAPHS) {
+                      int boxTop = transportY - 82;
+                      context.fill(0, boxTop, this.width, transportY, 0xF418181E);
+                      context.drawCenteredTextWithShadow(this.textRenderer, "Graphs (Transition Curve)", this.width / 2, boxTop + 6, 0xFFFFFFFF);
+                      drawButton(context, this.width - 36, boxTop + 4, 26, 14, "OK", 0xFF00C853, mouseX, mouseY);
+
+                      AnimationData.EasingGraph[] graphs = AnimationData.EasingGraph.values();
+                      int cardW = 54, cardH = 44, spacing = 8;
+                      int totalW = graphs.length * cardW + (graphs.length - 1) * spacing;
+                      int startX = (this.width - totalW) / 2;
+                      int cardY = boxTop + 22;
+
+                      for (int i = 0; i < graphs.length; i++) {
+                          AnimationData.EasingGraph g = graphs[i];
+                          int cx = startX + i * (cardW + spacing);
+                          boolean selected = (g == selectedGraph);
+                          context.fill(cx, cardY, cx + cardW, cardY + cardH, 0xFF2A2A32);
+                          context.drawBorder(cx, cardY, cardW, cardH, selected ? 0xFFFFFFFF : 0xFF454552);
+
+                          int plotW = cardW - 12, plotH = cardH - 12;
+                          for (int px = 0; px <= plotW; px++) {
+                              double eased = g.apply(px / (double) plotW);
+                              int drawX = cx + 6 + px;
+                              int drawY = cardY + cardH - 6 - (int) Math.round(eased * plotH);
+                              context.fill(drawX, drawY - 1, drawX + 2, drawY + 1, 0xFFFFFFFF);
+                          }
+                          context.drawCenteredTextWithShadow(this.textRenderer, g.label, cx + cardW / 2, cardY + cardH + 4, selected ? 0xFF00E5FF : 0xFFAAAAAA);
+                      }
+                  } else if (activePanel == SubPanel.EFFECTS) {
+                      int boxTop = transportY - 64;
+                      context.fill(0, boxTop, this.width, transportY, 0xF418181E);
+                      context.drawCenteredTextWithShadow(this.textRenderer, "EFFECTS: Pick Effect, then place ♦ ShowEffect & ♦ HideEffect", this.width / 2, boxTop + 5, 0xFFFFD54F);
+
+                      AnimationData.EffectType[] types = AnimationData.EffectType.values();
+                      int bw = (this.width - 28) / types.length;
+                      for (int i = 0; i < types.length; i++) {
+                          int bx = 8 + i * (bw + 2);
+                          drawButton(context, bx, boxTop + 18, bw, 18, types[i].label, (types[i] == selectedEffect) ? 0xFF8E24AA : 0xFF2B2B36, mouseX, mouseY);
+                      }
+                      drawButton(context, this.width / 2 - 130, boxTop + 41, 124, 18, "+♦ ShowEffect (Start)", 0xFF00897B, mouseX, mouseY);
+                      drawButton(context, this.width / 2 + 6, boxTop + 41, 124, 18, "+♦ HideEffect (Stop)", 0xFFD81B60, mouseX, mouseY);
+                  } else if (activePanel == SubPanel.MOVE_EDIT) {
+                      int boxTop = transportY - 56;
+                      context.fill(0, boxTop, this.width, transportY, 0xF418181E);
+                      String info = String.format(Locale.US, "Move Offset: X: %.1f  Y: %.1f  Z: %.1f | Curve: %s", editDx, editDy, editDz, selectedGraph.label);
+                      context.drawCenteredTextWithShadow(this.textRenderer, info, this.width / 2, boxTop + 6, 0xFF80DEEA);
+
+                      String[] btns = {"X -1", "X +1", "Y -1", "Y +1", "Z -1", "Z +1", "+♦ Add MoveBlock"};
+                      int bw = (this.width - 30) / btns.length;
+                      for (int i = 0; i < btns.length; i++) {
+                          int bx = 8 + i * (bw + 2);
+                          drawButton(context, bx, boxTop + 24, bw, 20, btns[i], (i == btns.length - 1) ? 0xFF00ACC1 : 0xFF2C2C38, mouseX, mouseY);
+                      }
+                  } else if (activePanel == SubPanel.SOUNDS) {
+                      int modalLeft = this.width / 2 - 140, modalRight = this.width / 2 + 140;
+                      int modalTop = 24, modalBottom = transportY - 6;
+
+                      context.fill(modalLeft, modalTop, modalRight, modalBottom, 0xF214141C);
+                      context.drawBorder(modalLeft, modalTop, modalRight - modalLeft, modalBottom - modalTop, 0xFF00ACC1);
+                      context.drawCenteredTextWithShadow(this.textRenderer, "SOUND LIST (" + filteredSoundIds.size() + ")", this.width / 2, modalTop + 6, 0xFFFFFFFF);
+
+                      soundSearchField.setX(modalLeft + 10);
+                      soundSearchField.setY(modalTop + 20);
+                      soundSearchField.setWidth(modalRight - modalLeft - 20);
+                      soundSearchField.render(context, mouseX, mouseY, 0);
+
+                      int listTop = modalTop + 42, rowH = 16;
+                      int maxRows = Math.max(1, (modalBottom - listTop - 6) / rowH);
+
+                      for (int i = 0; i < maxRows; i++) {
+                          int idx = soundScrollOffset + i;
+                          if (idx >= filteredSoundIds.size()) break;
+                          String soundId = filteredSoundIds.get(idx);
+                          int ry = listTop + i * rowH;
+
+                          context.fill(modalLeft + 8, ry, modalRight - 8, ry + rowH - 2, (i % 2 == 0) ? 0xFF20202A : 0xFF262632);
+                          String displayId = soundId.replace("minecraft:", "");
+                          if (displayId.length() > 28) displayId = displayId.substring(0, 28) + "..";
+                          context.drawTextWithShadow(this.textRenderer, displayId, modalLeft + 12, ry + 3, 0xFFE0E0E0);
+
+                          drawButton(context, modalRight - 78, ry + 1, 30, rowH - 4, "▶", 0xFF3949AB, mouseX, mouseY);
+                          drawButton(context, modalRight - 44, ry + 1, 32, rowH - 4, "+♦", 0xFF00897B, mouseX, mouseY);
+                      }
+                  }
+              }
+
+              private void drawButton(DrawContext context, int x, int y, int w, int h, String text, int bgColor, int mouseX, int mouseY) {
+                  boolean hovered = mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h;
+                  context.fill(x, y, x + w, y + h, bgColor);
+                  context.drawBorder(x, y, w, h, hovered ? 0xFFFFFFFF : 0xFF454555);
+                  context.drawCenteredTextWithShadow(this.textRenderer, text, x + w / 2, y + (h - 8) / 2, 0xFFFFFFFF);
+              }
+
+              private void drawDiamond(DrawContext context, int cx, int cy, int color) {
+                  context.fill(cx - 1, cy - 4, cx + 2, cy + 5, color);
+                  context.fill(cx - 2, cy - 3, cx + 3, cy + 4, color);
+                  context.fill(cx - 3, cy - 2, cx + 4, cy + 3, color);
+                  context.fill(cx - 4, cy - 1, cx + 5, cy + 2, color);
+              }
+
+              @Override
+              public boolean mouseClicked(double mouseX, double mouseY, int button) {
+                  if (activePanel == SubPanel.SOUNDS && soundSearchField.mouseClicked(mouseX, mouseY, button)) {
+                      this.setFocused(soundSearchField);
+                      return true;
+                  }
+
+                  int panelTop = this.height - 142;
+                  int transportY = panelTop - 22;
+
+                  if (handleSubPanelClick(mouseX, mouseY, transportY)) return true;
+
+                  if (mouseY >= transportY && mouseY < panelTop) {
+                      if (inBounds(mouseX, mouseY, 8, transportY + 3, 56, 16)) {
+                          data.playing = false;
+                          data.currentTime = 0.0f;
+                          syncToServer(true);
+                          return true;
+                      }
+                      if (inBounds(mouseX, mouseY, this.width / 2 - 16, transportY + 2, 32, 18)) {
+                          data.playing = !data.playing;
+                          syncToServer(false);
+                          return true;
+                      }
+                      if (inBounds(mouseX, mouseY, this.width - 116, transportY + 3, 34, 16)) {
+                          addMoveKeyframeAtPlayhead();
+                          return true;
+                      }
+                      if (inBounds(mouseX, mouseY, this.width - 76, transportY + 3, 30, 16)) {
+                          undo();
+                          return true;
+                      }
+                      if (inBounds(mouseX, mouseY, this.width - 40, transportY + 3, 30, 16)) {
+                          redo();
+                          return true;
+                      }
+                  }
+
+                  if (mouseY >= panelTop + 4 && mouseY <= panelTop + 92 && mouseX >= getTimelineLeft() && mouseX <= getTimelineRight()) {
+                      draggingPlayhead = true;
+                      data.playing = false;
+                      data.currentTime = xToTime(mouseX);
+                      syncToServer(false);
+                      return true;
+                  }
+
+                  int barY = this.height - 34;
+                  if (mouseY >= barY && mouseY <= barY + 24) {
+                      int btnW = (this.width - 24) / 7;
+                      for (int i = 0; i < 7; i++) {
+                          int bx = 8 + i * (btnW + 2);
+                          if (inBounds(mouseX, mouseY, bx, barY, btnW, 24)) {
+                              switch (i) {
+                                  case 0 -> this.close();
+                                  case 1 -> activePanel = (activePanel == SubPanel.MOVE_EDIT) ? SubPanel.NONE : SubPanel.MOVE_EDIT;
+                                  case 2 -> toggleShowHideBlockAtPlayhead();
+                                  case 3 -> activePanel = (activePanel == SubPanel.GRAPHS) ? SubPanel.NONE : SubPanel.GRAPHS;
+                                  case 4 -> activePanel = (activePanel == SubPanel.EFFECTS) ? SubPanel.NONE : SubPanel.EFFECTS;
+                                  case 5 -> activePanel = (activePanel == SubPanel.SOUNDS) ? SubPanel.NONE : SubPanel.SOUNDS;
+                                  case 6 -> deleteNearestKeyframeAtPlayhead();
+                              }
+                              return true;
+                          }
+                      }
+                  }
+
+                  return super.mouseClicked(mouseX, mouseY, button);
+              }
+
+              private boolean handleSubPanelClick(double mouseX, double mouseY, int transportY) {
+                  if (activePanel == SubPanel.NONE) return false;
+
+                  if (activePanel == SubPanel.GRAPHS) {
+                      int boxTop = transportY - 82;
+                      if (inBounds(mouseX, mouseY, this.width - 36, boxTop + 4, 26, 14)) {
+                          activePanel = SubPanel.NONE;
+                          return true;
+                      }
+                      AnimationData.EasingGraph[] graphs = AnimationData.EasingGraph.values();
+                      int cardW = 54, cardH = 44, spacing = 8;
+                      int totalW = graphs.length * cardW + (graphs.length - 1) * spacing;
+                      int startX = (this.width - totalW) / 2;
+                      int cardY = boxTop + 22;
+
+                      for (int i = 0; i < graphs.length; i++) {
+                          int cx = startX + i * (cardW + spacing);
+                          if (inBounds(mouseX, mouseY, cx, cardY, cardW, cardH + 14)) {
+                              pushUndoState();
+                              selectedGraph = graphs[i];
+                              for (AnimationData.MoveKeyframe mk : data.moveKeyframes) {
+                                  if (mk.time >= data.currentTime - 0.05f) {
+                                      mk.graph = selectedGraph;
+                                      break;
+                                  }
+                              }
+                              if (!data.moveKeyframes.isEmpty()) {
+                                  data.moveKeyframes.getLast().graph = selectedGraph;
+                              }
+                              syncToServer(false);
+                              return true;
+                          }
+                      }
+                  } else if (activePanel == SubPanel.EFFECTS) {
+                      int boxTop = transportY - 64;
+                      AnimationData.EffectType[] types = AnimationData.EffectType.values();
+                      int bw = (this.width - 28) / types.length;
+                      for (int i = 0; i < types.length; i++) {
+                          int bx = 8 + i * (bw + 2);
+                          if (inBounds(mouseX, mouseY, bx, boxTop + 18, bw, 18)) {
+                              selectedEffect = types[i];
+                              return true;
+                          }
+                      }
+                      if (inBounds(mouseX, mouseY, this.width / 2 - 130, boxTop + 41, 124, 18)) {
+                          pushUndoState();
+                          data.effectKeyframes.add(new AnimationData.EffectKeyframe(data.currentTime, selectedEffect, true, selectedGraph));
+                          syncToServer(false);
+                          return true;
+                      }
+                      if (inBounds(mouseX, mouseY, this.width / 2 + 6, boxTop + 41, 124, 18)) {
+                          pushUndoState();
+                          data.effectKeyframes.add(new AnimationData.EffectKeyframe(data.currentTime, selectedEffect, false, selectedGraph));
+                          syncToServer(false);
+                          return true;
+                      }
+                  } else if (activePanel == SubPanel.MOVE_EDIT) {
+                      int boxTop = transportY - 56;
+                      int bw = (this.width - 30) / 7;
+                      for (int i = 0; i < 7; i++) {
+                          int bx = 8 + i * (bw + 2);
+                          if (inBounds(mouseX, mouseY, bx, boxTop + 24, bw, 20)) {
+                              switch (i) {
+                                  case 0 -> editDx -= 1.0;
+                                  case 1 -> editDx += 1.0;
+                                  case 2 -> editDy -= 1.0;
+                                  case 3 -> editDy += 1.0;
+                                  case 4 -> editDz -= 1.0;
+                                  case 5 -> editDz += 1.0;
+                                  case 6 -> addMoveKeyframeAtPlayhead();
+                              }
+                              return true;
+                          }
+                      }
+                  } else if (activePanel == SubPanel.SOUNDS) {
+                      int modalLeft = this.width / 2 - 140, modalRight = this.width / 2 + 140;
+                      int modalTop = 24, modalBottom = transportY - 6;
+                      int listTop = modalTop + 42, rowH = 16;
+                      int maxRows = Math.max(1, (modalBottom - listTop - 6) / rowH);
+
+                      for (int i = 0; i < maxRows; i++) {
+                          int idx = soundScrollOffset + i;
+                          if (idx >= filteredSoundIds.size()) break;
+                          String soundId = filteredSoundIds.get(idx);
+                          int ry = listTop + i * rowH;
+
+                          if (inBounds(mouseX, mouseY, modalRight - 78, ry + 1, 30, rowH - 4)) {
+                              Identifier id = Identifier.tryParse(soundId);
+                              if (id != null && MinecraftClient.getInstance().player != null) {
+                                  SoundEvent evt = Registries.SOUND_EVENT.get(id);
+                                  if (evt != null) {
+                                      MinecraftClient.getInstance().player.playSound(evt, 1.0f, 1.0f);
+                                  }
+                              }
+                              return true;
+                          }
+                          if (inBounds(mouseX, mouseY, modalRight - 44, ry + 1, 32, rowH - 4)) {
+                              pushUndoState();
+                              data.soundKeyframes.add(new AnimationData.SoundKeyframe(data.currentTime, soundId));
+                              syncToServer(false);
+                              return true;
+                          }
+                      }
+                  }
+                  return false;
+              }
+
+              private void addMoveKeyframeAtPlayhead() {
+                  pushUndoState();
+                  data.moveKeyframes.removeIf(k -> Math.abs(k.time - data.currentTime) < 0.08f);
+                  data.moveKeyframes.add(new AnimationData.MoveKeyframe(data.currentTime, editDx, editDy, editDz, selectedGraph));
+                  syncToServer(false);
+              }
+
+              private void toggleShowHideBlockAtPlayhead() {
+                  pushUndoState();
+                  boolean currentlyShown = data.evaluateVisibility(data.currentTime);
+                  data.visibilityKeyframes.removeIf(k -> Math.abs(k.time - data.currentTime) < 0.08f);
+                  data.visibilityKeyframes.add(new AnimationData.VisibilityKeyframe(data.currentTime, !currentlyShown));
+                  syncToServer(false);
+              }
+
+              private void deleteNearestKeyframeAtPlayhead() {
+                  pushUndoState();
+                  float t = data.currentTime;
+                  data.moveKeyframes.removeIf(k -> k.time > 0.01f && Math.abs(k.time - t) < 0.35f);
+                  data.visibilityKeyframes.removeIf(k -> k.time > 0.01f && Math.abs(k.time - t) < 0.35f);
+                  data.effectKeyframes.removeIf(k -> Math.abs(k.time - t) < 0.35f);
+                  data.soundKeyframes.removeIf(k -> Math.abs(k.time - t) < 0.35f);
+                  syncToServer(false);
+              }
+
+              private boolean inBounds(double mx, double my, int x, int y, int w, int h) {
+                  return mx >= x && mx <= x + w && my >= y && my <= y + h;
+              }
+
+              @Override
+              public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
+                  if (draggingPlayhead) {
+                      data.currentTime = xToTime(mouseX);
+                      syncToServer(false);
+                      return true;
+                  }
+                  return super.mouseDragged(mouseX, mouseY, button, deltaX, deltaY);
+              }
+
+              @Override
+              public boolean mouseReleased(double mouseX, double mouseY, int button) {
+                  draggingPlayhead = false;
+                  return super.mouseReleased(mouseX, mouseY, button);
+              }
+
+              @Override
+              public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+                  if (activePanel == SubPanel.SOUNDS) {
+                      int delta = verticalAmount > 0 ? -3 : 3;
+                      soundScrollOffset = Math.max(0, Math.min(Math.max(0, filteredSoundIds.size() - 5), soundScrollOffset + delta));
+                      return true;
+                  }
+                  return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+              }
+
+              @Override
+              public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+                  if (activePanel == SubPanel.SOUNDS && soundSearchField.isFocused()) {
+                      if (soundSearchField.keyPressed(keyCode, scanCode, modifiers)) return true;
+                  }
+                  return super.keyPressed(keyCode, scanCode, modifiers);
+              }
+
+              @Override
+              public boolean charTyped(char chr, int modifiers) {
+                  if (activePanel == SubPanel.SOUNDS && soundSearchField.isFocused()) {
+                      if (soundSearchField.charTyped(chr, modifiers)) return true;
+                  }
+                  return super.charTyped(chr, modifiers);
+              }
+          }
+          EOF
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build Mod JAR
+        run: gradle build --no-daemon
+
+      - name: Upload Compiled Mod JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: animateblock-1.0.0-jar
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
